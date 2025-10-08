@@ -620,6 +620,37 @@ export function QuestionGenerator() {
 
       const topicIds = courseTopics.map(t => t.id);
 
+      // Get total PYQs for this course
+      const { data: allPYQs, error: allPYQsError } = await supabase
+        .from('questions_topic_wise')
+        .select('id, answer, solution')
+        .in('topic_id', topicIds);
+
+      if (allPYQsError) {
+        console.error('Error loading all PYQs:', allPYQsError);
+        toast.error(`Failed to load PYQ statistics: ${allPYQsError.message}`);
+        return;
+      }
+
+      // Calculate statistics
+      const totalPYQs = allPYQs?.length || 0;
+      const pyqsWithAnswer = allPYQs?.filter(pyq => pyq.answer && pyq.answer.trim() !== '').length || 0;
+      const pyqsWithSolution = allPYQs?.filter(pyq => pyq.solution && pyq.solution.trim() !== '').length || 0;
+      const pyqsWithBoth = allPYQs?.filter(pyq =>
+        pyq.answer && pyq.answer.trim() !== '' &&
+        pyq.solution && pyq.solution.trim() !== ''
+      ).length || 0;
+
+      // Show analysis
+      toast.success(
+        `📊 PYQ Analysis:\n` +
+        `Total PYQs: ${totalPYQs}\n` +
+        `With Answer: ${pyqsWithAnswer} (${((pyqsWithAnswer/totalPYQs)*100).toFixed(1)}%)\n` +
+        `With Solution: ${pyqsWithSolution} (${((pyqsWithSolution/totalPYQs)*100).toFixed(1)}%)\n` +
+        `Complete (Both): ${pyqsWithBoth} (${((pyqsWithBoth/totalPYQs)*100).toFixed(1)}%)`,
+        { duration: 10000 }
+      );
+
       // Now get PYQs without solutions from these topics
       const { data: pyqsWithoutSolutions, error } = await supabase
         .from('questions_topic_wise')
@@ -633,10 +664,14 @@ export function QuestionGenerator() {
         return;
       }
 
+      const remaining = pyqsWithoutSolutions?.length || 0;
+
       if (!pyqsWithoutSolutions || pyqsWithoutSolutions.length === 0) {
-        toast.success('All PYQs already have solutions!');
+        toast.success(`✅ All ${totalPYQs} PYQs already have complete solutions!`);
         return;
       }
+
+      toast.info(`🚀 Starting generation for ${remaining} remaining PYQs...`, { duration: 5000 });
 
       // Create a map of topic_id to topic data for quick lookup
       const topicMap = new Map(courseTopics.map(t => [t.id, t]));
@@ -685,13 +720,24 @@ export function QuestionGenerator() {
           if (solutions.length > 0) {
             const solution = solutions[0];
 
+            // Prepare update data
+            const updateData: any = {
+              answer: solution.answer,
+              solution: solution.solution
+            };
+
+            // Add slot and part if selected
+            if (selectedSlot) {
+              updateData.slot = selectedSlot;
+            }
+            if (selectedPart) {
+              updateData.part = selectedPart;
+            }
+
             // Update the PYQ with answer and solution
             const { error: updateError } = await supabase
               .from('questions_topic_wise')
-              .update({
-                answer: solution.answer,
-                solution: solution.solution
-              })
+              .update(updateData)
               .eq('id', pyq.id);
 
             if (updateError) {

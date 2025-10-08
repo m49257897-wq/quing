@@ -6,8 +6,14 @@
  * Fixes all common JSON parsing errors from LLM responses
  */
 function sanitizeJsonString(jsonString: string): string {
-  // Step 1: Remove markdown code blocks
-  let cleaned = jsonString.replace(/```json\s*/gi, '').replace(/```\s*/g, '').trim();
+  // Step 1: Remove markdown code blocks - AGGRESSIVE
+  let cleaned = jsonString
+    .replace(/```json/gi, '')
+    .replace(/```javascript/gi, '')
+    .replace(/```js/gi, '')
+    .replace(/```/g, '')
+    .replace(/^\s*json\s*/gi, '')
+    .trim();
 
   // Step 2: Remove ALL actual control characters (not escaped ones)
   // This includes \x00-\x1F and \x7F (DEL)
@@ -49,18 +55,27 @@ function sanitizeJsonString(jsonString: string): string {
     .replace(/['']/g, "'")
     .replace(/…/g, '...');
 
-  // Step 4: Fix Unicode escape sequences - COMPREHENSIVE FIX
-  // First, remove ALL invalid Unicode escape sequences completely
-  // Valid Unicode escapes must be \uXXXX where XXXX is exactly 4 hex digits
+  // Step 4: Fix Unicode escape sequences - NUCLEAR OPTION
+  // Valid Unicode escapes: \uXXXX where XXXX is exactly 4 hex digits
+  // Everything else gets removed completely
 
-  // Remove incomplete Unicode escapes like \u, \u1, \u12, \u123
-  cleaned = cleaned.replace(/\\u(?![0-9a-fA-F]{4})/g, '');
+  // First, protect valid Unicode sequences temporarily
+  const validUnicodePattern = /\\u[0-9a-fA-F]{4}/g;
+  const validUnicodes: string[] = [];
+  cleaned = cleaned.replace(validUnicodePattern, (match) => {
+    const index = validUnicodes.length;
+    validUnicodes.push(match);
+    return `___VALID_UNICODE_${index}___`;
+  });
 
-  // Remove invalid Unicode escapes that have non-hex characters
-  cleaned = cleaned.replace(/\\u[0-9a-fA-F]{0,3}[^0-9a-fA-F"\s,\]\}\\]/g, '');
+  // Now remove ALL remaining \u patterns (they're all invalid)
+  cleaned = cleaned.replace(/\\u[^_]/g, 'u');
+  cleaned = cleaned.replace(/\\u$/g, 'u');
 
-  // Replace any remaining standalone backslash-u combinations
-  cleaned = cleaned.replace(/\\u(?=[^0-9a-fA-F])/g, 'u');
+  // Restore valid Unicode sequences
+  validUnicodes.forEach((unicode, index) => {
+    cleaned = cleaned.replace(`___VALID_UNICODE_${index}___`, unicode);
+  });
 
   // Step 5: Remove trailing commas before closing brackets
   cleaned = cleaned.replace(/,(\s*[}\]])/g, '$1');
@@ -73,8 +88,11 @@ function sanitizeJsonString(jsonString: string): string {
   // Valid JSON escapes: \", \\, \/, \b, \f, \n, \r, \t, \uXXXX
   cleaned = cleaned.replace(/\\([^"\\\/bfnrtu])/g, '$1');
 
-  // Step 8: Final Unicode validation - remove any remaining malformed \u sequences
-  cleaned = cleaned.replace(/\\u[^0-9a-fA-F"][^"]{0,3}/g, '');
+  // Step 8: Final safety - remove any remaining problematic patterns
+  cleaned = cleaned
+    .replace(/\\x[0-9a-fA-F]{0,2}/g, '') // Remove hex escapes
+    .replace(/\\[0-7]{1,3}/g, '') // Remove octal escapes
+    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, ''); // Remove remaining control chars
 
   return cleaned;
 }
@@ -114,11 +132,14 @@ function parseJsonRobust(response: string, expectedType: 'array' | 'object' = 'a
       return JSON.parse(sanitizeJsonString(substring));
     },
 
-    // Strategy 4: Ultra-aggressive cleaning
+    // Strategy 4: Ultra-aggressive cleaning with markdown removal
     () => {
       let cleaned = response
         .replace(/```json/gi, '')
+        .replace(/```javascript/gi, '')
+        .replace(/```js/gi, '')
         .replace(/```/g, '')
+        .replace(/^json\\s*/gi, '')
         .trim();
 
       // Protect valid escape sequences
@@ -792,28 +813,26 @@ IMPORTANT: Avoid infinite loops in solution generation. If a solution has mistak
 - Use a completely different method if needed
 - Double-check all calculations before finalizing
 
-CRITICAL JSON OUTPUT REQUIREMENTS:
-1. Return ONLY the JSON array - no text before or after
-2. Do NOT use markdown code blocks (no \`\`\`json or \`\`\`)
-3. Do NOT include actual line breaks in strings - replace with space
-4. Do NOT use control characters (tabs, newlines) inside string values
-5. Keep all text on single lines within string values
-6. Use simple ASCII quotes only (no smart quotes "" or '')
-7. Avoid complex Unicode characters if possible
-8. Double-check JSON validity before returning
+ABSOLUTE JSON REQUIREMENTS (NON-NEGOTIABLE):
+1. Return ONLY the JSON array - NOTHING before or after
+2. NEVER use markdown code blocks (no \`\`\`json, no \`\`\`, no code fences)
+3. NEVER include actual line breaks in string values (use spaces instead)
+4. NEVER use control characters (\\n, \\r, \\t, etc.) inside strings
+5. NEVER use smart quotes (""), always use straight quotes (")
+6. NEVER use Unicode escape sequences (\\uXXXX)
+7. NEVER use hex escapes (\\xXX) or octal escapes (\\nnn)
+8. Keep all text as ONE continuous line - use periods to separate steps
+9. Start output directly with [ and end with ] - nothing else
 
-JSON FORMAT (question_statement and solution must be single-line text):
-[
-  {
-    "question_statement": "Complete question text on one line without line breaks",
-    "question_type": "${questionType}",
-    ${questionType === 'MCQ' || questionType === 'MSQ' ? '"options": ["Option A", "Option B", "Option C", "Option D"],' : '"options": null,'}
-    "answer": "${questionType === 'MCQ' ? 'A' : questionType === 'MSQ' ? 'A, C' : questionType === 'NAT' ? '42.5' : 'Detailed answer'}",
-    "solution": "Complete solution explanation on one line without line breaks. Use periods to separate steps."
-  }
-]
+CORRECT JSON FORMAT:
+[{"question_statement":"What is X?","question_type":"${questionType}",${questionType === 'MCQ' || questionType === 'MSQ' ? '"options":["Option A","Option B","Option C","Option D"],' : '"options":null,'}"answer":"${questionType === 'MCQ' ? 'A' : questionType === 'MSQ' ? 'A, C' : questionType === 'NAT' ? '42.5' : 'Detailed answer'}","solution":"Step 1. Do X. Step 2. Calculate Y. Step 3. Conclude Z."}]
 
-Generate exactly ${count} question(s). Remember: ALL strings must be single-line, no line breaks allowed.`;
+INCORRECT (will cause errors):
+\`\`\`json
+[...]
+\`\`\`
+
+Generate exactly ${count} question(s). Output only pure JSON. No markdown, no line breaks in strings.`;
 
   try {
     console.log('CHECKPOINT: Starting question generation for topic', {
@@ -937,24 +956,26 @@ For each question provide:
 - Step-by-step solution with clear explanations
 - Verification that your answer is correct
 
-CRITICAL JSON OUTPUT REQUIREMENTS:
-1. Return ONLY the JSON array - no text before or after
-2. Do NOT use markdown code blocks (no \`\`\`json or \`\`\`)
-3. Do NOT include line breaks in strings - keep all text single-line
-4. Do NOT use control characters inside string values
-5. Use simple ASCII quotes only (no smart quotes)
-6. Solution text must be on one continuous line
-7. Do NOT use Unicode escape sequences
+ABSOLUTE JSON REQUIREMENTS (NON-NEGOTIABLE):
+1. Return ONLY the JSON array - NOTHING before or after
+2. NEVER use markdown code blocks (no \`\`\`json, no \`\`\`, no code fences)
+3. NEVER include actual line breaks in string values (use spaces instead)
+4. NEVER use control characters (\\n, \\r, \\t, etc.) inside strings
+5. NEVER use smart quotes (""), always use straight quotes (")
+6. NEVER use Unicode escape sequences (\\uXXXX)
+7. NEVER use hex escapes (\\xXX) or octal escapes (\\nnn)
+8. Keep solution text as ONE continuous line - use periods to separate steps
+9. Start output directly with [ and end with ] - nothing else
 
-JSON FORMAT (solution must be single-line text):
-[
-  {
-    "answer": "Correct answer verified twice",
-    "solution": "Complete verified solution on one line without line breaks. Use periods to separate steps. Explain reasoning clearly."
-  }
-]
+CORRECT JSON FORMAT:
+[{"answer":"A","solution":"Step 1. Calculate X. Step 2. Verify Y. Step 3. Conclude Z. Therefore answer is A."}]
 
-Remember: 100% accuracy is required. Triple-check everything.`;
+INCORRECT (will cause errors):
+\`\`\`json
+[...]
+\`\`\`
+
+Remember: 100% accuracy required. Triple-check calculations. Output only pure JSON.`;
 
   try {
     const response = await callGeminiAPI(prompt, undefined, 0.1, 3000);
