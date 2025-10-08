@@ -213,11 +213,11 @@ export function QuestionGenerator() {
     // Separate topics with and without weightage
     const topicsWithWeightage = topics.filter(topic => (topic.weightage || 0) > 0);
     const topicsWithoutWeightage = topics.filter(topic => (topic.weightage || 0) === 0);
-    
+
     const totalWeightage = topicsWithWeightage.reduce((sum, topic) => sum + (topic.weightage || 0.02), 0);
-    
-    // For 1000+ questions, generate extra questions for zero-weightage topics
-    const shouldGenerateForZeroWeightage = totalQuestions >= 1000;
+
+    // For 500+ questions, generate extra questions for zero-weightage topics
+    const shouldGenerateForZeroWeightage = totalQuestions >= 500;
     const extraQuestionsCount = shouldGenerateForZeroWeightage ? topicsWithoutWeightage.length : 0;
     
     const result = topics.map(topic => {
@@ -268,6 +268,29 @@ export function QuestionGenerator() {
     const newKeys = [...apiKeys];
     newKeys[index] = value;
     setApiKeys(newKeys);
+  };
+
+  const handleBulkApiKeyPaste = (event: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    event.preventDefault();
+    const pastedText = event.clipboardData.getData('text');
+
+    // Extract all API keys that start with AIzaSy
+    const keyPattern = /AIzaSy[a-zA-Z0-9_-]+/g;
+    const extractedKeys = pastedText.match(keyPattern) || [];
+
+    if (extractedKeys.length === 0) {
+      toast.error('No valid API keys found. Keys must start with AIzaSy');
+      return;
+    }
+
+    // Limit to 100 keys
+    const keysToAdd = extractedKeys.slice(0, 100);
+
+    // Remove duplicates
+    const uniqueKeys = Array.from(new Set(keysToAdd));
+
+    setApiKeys(uniqueKeys);
+    toast.success(`✅ ${uniqueKeys.length} unique API key(s) added!`);
   };
 
   const startGeneration = async () => {
@@ -577,99 +600,124 @@ export function QuestionGenerator() {
   };
 
   const generatePYQSolutions = async () => {
-    // Get PYQs without solutions
-    const { data: pyqsWithoutSolutions, error } = await supabase
-      .from('questions_topic_wise')
-      .select(`
-        *, 
-        topics!inner(id, name, notes, chapter_id)
-      `)
-      .or('solution.is.null,solution.eq.')
-      .eq('topics.chapters.course_id', selectedCourse);
+    try {
+      // First get all topics for the selected course
+      const { data: courseTopics, error: topicsError } = await supabase
+        .from('topics')
+        .select('id, name, notes, chapter_id, chapters!inner(course_id)')
+        .eq('chapters.course_id', selectedCourse);
 
-    if (error) {
-      console.error('Error loading PYQs:', error);
-      toast.error('Failed to load PYQs');
-      return;
-    }
-
-    if (!pyqsWithoutSolutions || pyqsWithoutSolutions.length === 0) {
-      toast.success('All PYQs already have solutions!');
-      return {
-        ...topic,
-        questionsToGenerate: 0
-      };
-    }
-
-    setProgress(prev => ({
-      ...prev,
-      totalQuestionsTarget: pyqsWithoutSolutions.length,
-      stage: 'pyq_solutions'
-    }));
-
-    let solutionsGenerated = 0;
-
-    for (let i = 0; i < pyqsWithoutSolutions.length; i++) {
-      const pyq = pyqsWithoutSolutions[i];
-
-      if (progress.isPaused) {
-        await new Promise(resolve => {
-          const checkPause = () => {
-            if (!progress.isPaused) {
-              resolve(undefined);
-            } else {
-              setTimeout(checkPause, 1000);
-            }
-          };
-          checkPause();
-        });
+      if (topicsError) {
+        console.error('Error loading topics:', topicsError);
+        toast.error('Failed to load topics');
+        return;
       }
+
+      if (!courseTopics || courseTopics.length === 0) {
+        toast.error('No topics found for this course');
+        return;
+      }
+
+      const topicIds = courseTopics.map(t => t.id);
+
+      // Now get PYQs without solutions from these topics
+      const { data: pyqsWithoutSolutions, error } = await supabase
+        .from('questions_topic_wise')
+        .select('*')
+        .in('topic_id', topicIds)
+        .or('solution.is.null,solution.eq.,answer.is.null,answer.eq.');
+
+      if (error) {
+        console.error('Error loading PYQs:', error);
+        toast.error(`Failed to load PYQs: ${error.message}`);
+        return;
+      }
+
+      if (!pyqsWithoutSolutions || pyqsWithoutSolutions.length === 0) {
+        toast.success('All PYQs already have solutions!');
+        return;
+      }
+
+      // Create a map of topic_id to topic data for quick lookup
+      const topicMap = new Map(courseTopics.map(t => [t.id, t]));
+
+      // Enrich PYQs with topic data
+      const enrichedPYQs = pyqsWithoutSolutions.map(pyq => ({
+        ...pyq,
+        topics: topicMap.get(pyq.topic_id)
+      })).filter(pyq => pyq.topics); // Filter out any PYQs without valid topic data
 
       setProgress(prev => ({
         ...prev,
-        currentTopic: pyq.topics.name,
-        totalQuestionsGenerated: i + 1
+        totalQuestionsTarget: enrichedPYQs.length,
+        stage: 'pyq_solutions'
       }));
 
-      try {
-        toast(`🤖 Gemini generating solution for PYQ ${i + 1}/${pyqsWithoutSolutions.length}...`, { duration: 2000 });
+      let solutionsGenerated = 0;
 
-        const solutions = await generateSolutionsForPYQs([pyq], pyq.topics.notes);
+      for (let i = 0; i < enrichedPYQs.length; i++) {
+        const pyq = enrichedPYQs[i];
 
-        if (solutions.length > 0) {
-          const solution = solutions[0];
-          
-          // Update the PYQ with answer and solution
-          const { error: updateError } = await supabase
-            .from('questions_topic_wise')
-            .update({
-              answer: solution.answer,
-              solution: solution.solution,
-              answer_done: true,
-              solution_done: true
-            })
-            .eq('id', pyq.id);
-
-          if (updateError) {
-            console.error('Error updating PYQ:', updateError);
-            toast.error(`Failed to save solution: ${updateError.message}`);
-          } else {
-            solutionsGenerated++;
-            setGeneratedCount(prev => ({ ...prev, pyq: solutionsGenerated }));
-            toast.success(`✅ Solution ${i + 1} generated and saved!`);
-          }
+        if (progress.isPaused) {
+          await new Promise(resolve => {
+            const checkPause = () => {
+              if (!progress.isPaused) {
+                resolve(undefined);
+              } else {
+                setTimeout(checkPause, 1000);
+              }
+            };
+            checkPause();
+          });
         }
 
-        // Delay between solutions
-        await new Promise(resolve => setTimeout(resolve, 8000));
+        setProgress(prev => ({
+          ...prev,
+          currentTopic: pyq.topics.name,
+          totalQuestionsGenerated: i + 1
+        }));
 
-      } catch (error) {
-        console.error(`Error generating solution for PYQ ${i + 1}:`, error);
-        toast.error(`Failed to generate solution ${i + 1}: ${error.message}`);
+        try {
+          toast(`🤖 Gemini generating solution for PYQ ${i + 1}/${enrichedPYQs.length}...`, { duration: 2000 });
+
+          const solutions = await generateSolutionsForPYQs([pyq], pyq.topics?.notes || '');
+
+          if (solutions.length > 0) {
+            const solution = solutions[0];
+
+            // Update the PYQ with answer and solution
+            const { error: updateError } = await supabase
+              .from('questions_topic_wise')
+              .update({
+                answer: solution.answer,
+                solution: solution.solution
+              })
+              .eq('id', pyq.id);
+
+            if (updateError) {
+              console.error('Error updating PYQ:', updateError);
+              toast.error(`Failed to save solution: ${updateError.message}`);
+            } else {
+              solutionsGenerated++;
+              setGeneratedCount(prev => ({ ...prev, pyq: solutionsGenerated }));
+              toast.success(`✅ Solution ${i + 1} generated and saved!`);
+            }
+          }
+
+          // Delay between solutions
+          await new Promise(resolve => setTimeout(resolve, 8000));
+
+        } catch (error) {
+          console.error(`Error generating solution for PYQ ${i + 1}:`, error);
+          toast.error(`Failed to generate solution ${i + 1}: ${error.message}`);
+        }
       }
-    }
 
-    toast.success(`🎉 PYQ Solutions complete! Generated ${solutionsGenerated} solutions!`);
+      toast.success(`🎉 PYQ Solutions complete! Generated ${solutionsGenerated} solutions!`);
+    } catch (error) {
+      console.error('Error in PYQ solution generation:', error);
+      toast.error(`PYQ generation failed: ${error.message}`);
+    }
   };
 
   const pauseGeneration = () => {
@@ -760,6 +808,20 @@ export function QuestionGenerator() {
             <p className="text-sm text-gray-600 mb-4">
               Add up to 100 Gemini API keys. The system will rotate them automatically and handle errors with 10-second delays.
             </p>
+
+            <div className="mb-4">
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Bulk Paste API Keys (One-Click Import)
+              </label>
+              <textarea
+                onPaste={handleBulkApiKeyPaste}
+                placeholder="Paste all your API keys here (each starting with AIzaSy). The system will automatically extract and separate them."
+                className="w-full px-4 py-3 border border-gray-200 rounded-xl focus:ring-2 focus:ring-purple-500 focus:border-transparent transition-all min-h-[100px]"
+              />
+              <p className="text-xs text-gray-500 mt-1">
+                💡 Paste all keys at once - they'll be automatically separated by detecting "AIzaSy" pattern
+              </p>
+            </div>
 
             <div className="space-y-3 max-h-96 overflow-y-auto pr-2">
               {apiKeys.map((key, index) => (

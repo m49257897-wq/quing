@@ -49,13 +49,18 @@ function sanitizeJsonString(jsonString: string): string {
     .replace(/['']/g, "'")
     .replace(/…/g, '...');
 
-  // Step 4: Fix Unicode escape sequences
-  // Replace invalid \u sequences
-  cleaned = cleaned.replace(/\\u([0-9a-fA-F]{0,3})(?![0-9a-fA-F])/g, (match, group) => {
-    if (group.length === 0) return '\\u0000';
-    const padded = group.padEnd(4, '0');
-    return `\\u${padded}`;
-  });
+  // Step 4: Fix Unicode escape sequences - COMPREHENSIVE FIX
+  // First, remove ALL invalid Unicode escape sequences completely
+  // Valid Unicode escapes must be \uXXXX where XXXX is exactly 4 hex digits
+
+  // Remove incomplete Unicode escapes like \u, \u1, \u12, \u123
+  cleaned = cleaned.replace(/\\u(?![0-9a-fA-F]{4})/g, '');
+
+  // Remove invalid Unicode escapes that have non-hex characters
+  cleaned = cleaned.replace(/\\u[0-9a-fA-F]{0,3}[^0-9a-fA-F"\s,\]\}\\]/g, '');
+
+  // Replace any remaining standalone backslash-u combinations
+  cleaned = cleaned.replace(/\\u(?=[^0-9a-fA-F])/g, 'u');
 
   // Step 5: Remove trailing commas before closing brackets
   cleaned = cleaned.replace(/,(\s*[}\]])/g, '$1');
@@ -65,7 +70,11 @@ function sanitizeJsonString(jsonString: string): string {
 
   // Step 7: Fix common broken escape sequences
   // Remove invalid escape sequences that aren't valid JSON
+  // Valid JSON escapes: \", \\, \/, \b, \f, \n, \r, \t, \uXXXX
   cleaned = cleaned.replace(/\\([^"\\\/bfnrtu])/g, '$1');
+
+  // Step 8: Final Unicode validation - remove any remaining malformed \u sequences
+  cleaned = cleaned.replace(/\\u[^0-9a-fA-F"][^"]{0,3}/g, '');
 
   return cleaned;
 }
@@ -893,30 +902,40 @@ export async function generateSolutionsForPYQs(
   if (pyqs.length === 0) return [];
 
   const notesContext = topicNotes ?
-    `\n\nTOPIC NOTES (Use ONLY these methods to solve):\n${topicNotes.slice(0, 2500)}` : '';
+    `\n\nTOPIC NOTES (Use these concepts and methods to solve):\n${topicNotes.slice(0, 2500)}` : '';
 
-  const prompt = `You are a professor solving ${pyqs[0].topics?.name || 'academic'} questions. Provide accurate answers and clear solutions.
+  const prompt = `You are an expert professor solving ${pyqs[0].topics?.name || 'academic'} questions with 100% accuracy.
 ${notesContext}
 
-CRITICAL INSTRUCTIONS:
-1. When solving, STRICTLY use methods and concepts from the Topic Notes above
-2. Do NOT use alternative methods or shortcuts not mentioned in the notes
-3. If you encounter calculation errors, stop and recalculate - don't continue with wrong values
-4. Write naturally as a professor would explain to a student, not in a robotic AI style
-5. Verify your final answer before submitting
+CRITICAL ACCURACY REQUIREMENTS:
+1. Triple-check every calculation before finalizing
+2. For MCQ: Verify each option thoroughly, only mark ONE as correct
+3. For MSQ: Check all options, mark ALL correct ones (usually 2-3 options)
+4. For NAT: Calculate the exact numerical value, verify with alternative method if possible
+5. For Subjective: Provide comprehensive step-by-step answer
+6. Use the concepts from Topic Notes when available
+7. If unsure, recalculate using a different approach to verify
+8. Your answer MUST be 100% correct - wrong answers are unacceptable
+
+VERIFICATION PROCESS:
+- Step 1: Read the question carefully and identify what's being asked
+- Step 2: Solve using the most reliable method
+- Step 3: Double-check your work with alternative approach or reverse calculation
+- Step 4: Verify answer matches the question type requirements
+- Step 5: Write clear solution explaining each step
 
 Questions to solve:
 ${pyqs.map((q, i) => `
 Question ${i+1}:
-${q.question_statement}
+Statement: ${q.question_statement}
 Type: ${q.question_type}
 ${q.options ? `Options:\n${q.options.map((opt, idx) => `  ${String.fromCharCode(65+idx)}. ${opt}`).join('\n')}` : ''}
 `).join('\n')}
 
 For each question provide:
-- Correct answer (MCQ: 'A', MSQ: 'A, C', NAT: numerical value)
-- Step-by-step solution using Topic Notes methods
-- Clear explanation in professor-like natural language
+- CORRECT answer (MCQ: 'A' or 'B' or 'C' or 'D', MSQ: 'A, C' format, NAT: exact numerical value, SUB: comprehensive answer)
+- Step-by-step solution with clear explanations
+- Verification that your answer is correct
 
 CRITICAL JSON OUTPUT REQUIREMENTS:
 1. Return ONLY the JSON array - no text before or after
@@ -925,16 +944,17 @@ CRITICAL JSON OUTPUT REQUIREMENTS:
 4. Do NOT use control characters inside string values
 5. Use simple ASCII quotes only (no smart quotes)
 6. Solution text must be on one continuous line
+7. Do NOT use Unicode escape sequences
 
 JSON FORMAT (solution must be single-line text):
 [
   {
-    "answer": "Correct answer",
-    "solution": "Complete solution on one line without line breaks. Use periods to separate steps."
+    "answer": "Correct answer verified twice",
+    "solution": "Complete verified solution on one line without line breaks. Use periods to separate steps. Explain reasoning clearly."
   }
 ]
 
-Verify all calculations and ensure solution correctness.`;
+Remember: 100% accuracy is required. Triple-check everything.`;
 
   try {
     const response = await callGeminiAPI(prompt, undefined, 0.1, 3000);
